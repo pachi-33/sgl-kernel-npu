@@ -4,10 +4,10 @@
 
 | Implementation | arch22 | arch35 |
 | --- | --- | --- |
-| `ascend-transformer-boost` | Supported | Unsupported |
+| `ascend-transformer-boost` | Supported | Supported |
 | `torch_native` | Supported | Supported |
 
-The legacy ATB binding is registered for the A2/A3 host-length path.
+The ATB binding is registered on A2/A3 and A5. It takes context lengths on the host and requires an SDK that provides `torch_npu._npu_paged_attention_mla`.
 
 ## Signature
 

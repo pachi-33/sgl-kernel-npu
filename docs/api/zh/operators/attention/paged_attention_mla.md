@@ -4,10 +4,10 @@
 
 | 实现 | arch22 | arch35 |
 | --- | --- | --- |
-| `ascend-transformer-boost` | 支持 | 不支持 |
+| `ascend-transformer-boost` | 支持 | 支持 |
 | `torch_native` | 支持 | 支持 |
 
-旧版 ATB 入口在 A2/A3 上注册，采用主机侧长度参数。
+ATB 入口在 A2/A3 和 A5 上注册，使用主机侧上下文长度，要求 SDK 提供 `torch_npu._npu_paged_attention_mla`。
 
 ## 函数原型
 

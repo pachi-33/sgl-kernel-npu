@@ -1,11 +1,15 @@
-"""SGLang Qwen3 GQA and DeepSeek-V2 MLA cases for legacy ATB attention."""
+"""SGLang paged attention, including the FIA and ATB MLA decode paths."""
 
 import math
 
 import pytest
 
-from tests.python.utils.accuracy import check_accuracy
-from tests.python.utils.common import get_test_impls, require_test_impl
+from tests.python.utils.accuracy import assert_accuracy, check_accuracy
+from tests.python.utils.common import (
+    get_skip_acc_check,
+    get_test_impls,
+    require_test_impl,
+)
 from tests.python.utils.performance import check_performance
 from tests.python.utils.standards import AccuracyStandard
 
@@ -128,6 +132,71 @@ def test_legacy_atb_attention(
         standard={"torch.bfloat16": AccuracyStandard(atol=2e-2, rtol=2e-2)},
     )
     check_performance(executor)
+
+
+@pytest.mark.parametrize(
+    "operator, standard",
+    [
+        pytest.param(
+            "fused_infer_attention_score",
+            AccuracyStandard(atol=4e-3, rtol=6e-3),
+            id="fia",
+        ),
+        pytest.param(
+            "paged_attention_mla", AccuracyStandard(atol=2e-2, rtol=2e-2), id="atb"
+        ),
+    ],
+)
+def test_a5_mla_decode_4q1kv(operator, standard, record_property):
+    from sgl_kernel_npu.operators import attention
+    from sgl_kernel_npu.operators.utils.generation import Generation, get_hardware
+
+    if get_hardware().generation is not Generation.ARCH35:
+        pytest.skip("This MLA decode configuration targets Ascend A5")
+    impl, impl_ref = get_test_impls()
+    if get_skip_acc_check() or impl == "torch_native" or impl_ref != "torch_native":
+        pytest.skip("This case compares an A5 backend with the PyTorch MLA reference")
+
+    # Both SGLang paths attend to the same latent (512) and RoPE (64) channels.
+    # The packed PyTorch reference computes QK and softmax in FP32 for both.
+    inputs = generate_data(4, 1, 576, (255, 129), None, 512)
+    expected = torch.full_like(inputs["out"], torch.nan)
+    attention.paged_attention_mla(**{**inputs, "out": expected}, impl=impl_ref)
+
+    if operator == "paged_attention_mla":
+        attention.paged_attention_mla(**inputs, impl=impl)
+        actual = inputs["out"]
+    else:
+        query, query_rope = inputs["query"].unsqueeze(1).split((512, 64), dim=-1)
+        latent, key_rope = inputs["key_cache"].flatten(2).split((512, 64), dim=-1)
+        kv_cache = latent.contiguous()
+        output, _ = attention.fused_infer_attention_score(
+            query.contiguous(),
+            kv_cache,
+            kv_cache,
+            query_rope=query_rope.contiguous(),
+            key_rope=key_rope.contiguous(),
+            num_heads=4,
+            num_key_value_heads=1,
+            input_layout="BSND",
+            atten_mask=None,
+            sparse_mode=0,
+            scale=inputs["scale_value"],
+            antiquant_mode=0,
+            antiquant_scale=None,
+            block_table=inputs["block_table"],
+            block_size=_PAGE_SIZE,
+            actual_seq_lengths_kv=inputs["context_lens"].tolist(),
+            softmax_lse_flag=False,
+            impl=impl,
+        )
+        # The eager caller consumes the attention output with one token per request.
+        assert output.shape == (2, 1, 4, 512)
+        actual = output.squeeze(1)
+
+    max_abs_error = (actual.float() - expected.float()).abs().max().item()
+    record_property("max_abs_error", max_abs_error)
+    assert_accuracy(actual, expected, {"torch.bfloat16": standard})
 
 
 @pytest.mark.parametrize("blocked_value", [1.0, -torch.inf], ids=["binary", "additive"])
